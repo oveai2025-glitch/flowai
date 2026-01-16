@@ -1,0 +1,470 @@
+// WFAIB Enterprise - Prisma Schema
+// PostgreSQL with Row-Level Security support
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+}
+
+// ============================================
+// Multi-Tenancy: Organizations
+// ============================================
+
+model Organization {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String
+  slug        String   @unique
+  plan        Plan     @default(FREE)
+  
+  // Billing
+  stripeCustomerId     String?   @unique
+  stripeSubscriptionId String?
+  billingEmail         String?
+  
+  // Settings
+  settings    Json     @default("{}")
+  
+  // Limits (overridable per org)
+  maxWorkflows        Int @default(5)
+  maxRunsPerMonth     Int @default(1000)
+  maxTokensPerMonth   Int @default(100000)
+  maxConnectors       Int @default(10)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  users           OrganizationUser[]
+  workflows       Workflow[]
+  runs            Run[]
+  credentials     Credential[]
+  apiKeys         ApiKey[]
+  auditLogs       AuditLog[]
+  usageRecords    UsageRecord[]
+  invitations     Invitation[]
+  webhookEndpoints WebhookEndpoint[]
+  
+  @@map("organizations")
+}
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+  BUSINESS
+  ENTERPRISE
+}
+
+// ============================================
+// Users & Authentication
+// ============================================
+
+model User {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String   @unique
+  name          String?
+  passwordHash  String?
+  avatarUrl     String?
+  emailVerified DateTime?
+  preferences   Json     @default("{}")
+  lastLoginAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  organizations     OrganizationUser[]
+  createdWorkflows  Workflow[]        @relation("CreatedBy")
+  triggeredRuns     Run[]             @relation("TriggeredBy")
+  auditLogs         AuditLog[]
+  sessions          Session[]
+  accounts          Account[]
+  
+  @@map("users")
+}
+
+model OrganizationUser {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  userId         String   @db.Uuid
+  role           Role     @default(MEMBER)
+  permissions    String[] @default([])
+  joinedAt       DateTime @default(now())
+  
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([organizationId, userId])
+  @@map("organization_users")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+model Session {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @db.Uuid
+  token        String   @unique
+  expiresAt    DateTime
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("sessions")
+}
+
+model Account {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refreshToken      String?
+  accessToken       String?
+  expiresAt         Int?
+  tokenType         String?
+  scope             String?
+  idToken           String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Invitation {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  email          String
+  role           Role     @default(MEMBER)
+  token          String   @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@unique([organizationId, email])
+  @@map("invitations")
+}
+
+// ============================================
+// Workflows
+// ============================================
+
+model Workflow {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String
+  description    String?
+  definition     Json
+  isActive       Boolean  @default(false)
+  isTemplate     Boolean  @default(false)
+  version        Int      @default(1)
+  publishedAt    DateTime?
+  triggerType    TriggerType?
+  triggerConfig  Json?
+  cronExpression String?
+  timezone       String   @default("UTC")
+  nextRunAt      DateTime?
+  settings       Json     @default("{}")
+  errorHandling  ErrorHandling @default(STOP)
+  retryCount     Int      @default(3)
+  retryDelay     Int      @default(1000)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy      User?        @relation("CreatedBy", fields: [createdById], references: [id])
+  createdById    String?      @db.Uuid
+  runs           Run[]
+  versions       WorkflowVersion[]
+  webhookEndpoint WebhookEndpoint?
+  
+  @@index([organizationId])
+  @@index([isActive])
+  @@map("workflows")
+}
+
+enum TriggerType {
+  MANUAL
+  WEBHOOK
+  SCHEDULE
+  API
+  EVENT
+}
+
+enum ErrorHandling {
+  STOP
+  CONTINUE
+  RETRY
+}
+
+model WorkflowVersion {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workflowId  String   @db.Uuid
+  version     Int
+  definition  Json
+  changelog   String?
+  createdAt   DateTime @default(now())
+  createdById String?  @db.Uuid
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  @@unique([workflowId, version])
+  @@map("workflow_versions")
+}
+
+// ============================================
+// Workflow Runs
+// ============================================
+
+model Run {
+  id             String    @id @db.Uuid
+  organizationId String    @db.Uuid
+  workflowId     String    @db.Uuid
+  status         RunStatus @default(PENDING)
+  triggerType    TriggerType
+  triggeredById  String?   @db.Uuid
+  input          Json?
+  output         Json?
+  error          String?
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  nodeCount      Int       @default(0)
+  nodesExecuted  Int       @default(0)
+  tokensUsed     Int       @default(0)
+  metadata       Json      @default("{}")
+  
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workflow       Workflow     @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  triggeredBy    User?        @relation("TriggeredBy", fields: [triggeredById], references: [id])
+  logs           RunLog[]
+  
+  @@index([organizationId])
+  @@index([workflowId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("runs")
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+
+model RunLog {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId       String       @db.Uuid
+  nodeId      String
+  nodeName    String
+  nodeType    String
+  status      NodeStatus
+  startedAt   DateTime     @default(now())
+  completedAt DateTime?
+  durationMs  Int?
+  input       Json?
+  output      Json?
+  error       String?
+  attempt     Int          @default(1)
+  run         Run          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@index([runId])
+  @@map("run_logs")
+}
+
+enum NodeStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+// ============================================
+// Credentials
+// ============================================
+
+model Credential {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String
+  connectorType  String
+  encryptedData  String
+  accessToken    String?
+  refreshToken   String?
+  tokenExpiresAt DateTime?
+  scopes         String[] @default([])
+  isValid        Boolean  @default(true)
+  lastUsedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("credentials")
+}
+
+// ============================================
+// API Keys
+// ============================================
+
+model ApiKey {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String
+  keyHash        String   @unique
+  keyPrefix      String
+  scopes         String[] @default([])
+  rateLimit      Int      @default(100)
+  isActive       Boolean  @default(true)
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+// ============================================
+// Webhooks
+// ============================================
+
+model WebhookEndpoint {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String      @db.Uuid
+  workflowId     String      @unique @db.Uuid
+  path           String
+  method         String      @default("POST")
+  secret         String?
+  authType       WebhookAuth @default(NONE)
+  isActive       Boolean     @default(true)
+  totalRequests  Int         @default(0)
+  lastRequestAt  DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workflow       Workflow     @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  @@unique([organizationId, path])
+  @@index([path])
+  @@map("webhook_endpoints")
+}
+
+enum WebhookAuth {
+  NONE
+  BASIC
+  BEARER
+  SIGNATURE
+  API_KEY
+}
+
+// ============================================
+// Usage & Billing
+// ============================================
+
+model UsageRecord {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  period         String
+  runCount       Int      @default(0)
+  nodeCount      Int      @default(0)
+  tokenCount     Int      @default(0)
+  webhookCount   Int      @default(0)
+  storageBytes   BigInt   @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@unique([organizationId, period])
+  @@map("usage_records")
+}
+
+// ============================================
+// Audit Logging
+// ============================================
+
+model AuditLog {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @db.Uuid
+  userId         String?  @db.Uuid
+  action         String
+  resourceType   String
+  resourceId     String?
+  ipAddress      String?
+  userAgent      String?
+  oldValue       Json?
+  newValue       Json?
+  metadata       Json?
+  timestamp      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User?        @relation(fields: [userId], references: [id])
+  @@index([organizationId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+// ============================================
+// Connector & Template Registry
+// ============================================
+
+model ConnectorDefinition {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug         String   @unique
+  name         String
+  description  String?
+  category     String
+  tags         String[] @default([])
+  iconUrl      String?
+  color        String?
+  version      String
+  definition   Json
+  source       ConnectorSource @default(OFFICIAL)
+  installCount Int      @default(0)
+  rating       Float    @default(0)
+  isPublished  Boolean  @default(false)
+  isDeprecated Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@index([category])
+  @@map("connector_definitions")
+}
+
+enum ConnectorSource {
+  OFFICIAL
+  COMMUNITY
+  CUSTOM
+}
+
+model Template {
+  id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug               String     @unique
+  name               String
+  description        String
+  definition         Json
+  thumbnail          String?
+  category           String
+  tags               String[]   @default([])
+  requiredConnectors String[]   @default([])
+  difficulty         Difficulty @default(BEGINNER)
+  estimatedTime      String?
+  useCount           Int        @default(0)
+  rating             Float      @default(0)
+  authorName         String?
+  isPublished        Boolean    @default(false)
+  isFeatured         Boolean    @default(false)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  @@index([category])
+  @@map("templates")
+}
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}

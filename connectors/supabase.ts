@@ -1,0 +1,12 @@
+import { z } from 'zod';
+import { createConnector } from '../packages/connector-sdk/src/builder';
+export const supabaseConnector = createConnector({ id: 'supabase', name: 'Supabase', version: '1.0.0', category: 'database', description: 'PostgreSQL database with instant APIs', color: '#3ECF8E', icon: 'https://cdn.flowatgenai.com/connectors/supabase.svg', tags: ['database', 'postgres', 'api'], baseUrl: 'https://{project}.supabase.co/rest/v1' })
+.withApiKey({ location: 'header', name: 'apikey', fields: [{ key: 'projectUrl', label: 'Project URL', type: 'string', required: true }, { key: 'apiKey', label: 'API Key', type: 'password', required: true }] })
+.withAction('selectRows', { name: 'Select Rows', description: 'Query table rows', input: z.object({ table: z.string(), select: z.string().optional().default('*'), filter: z.string().optional(), limit: z.number().optional() }), output: z.object({ data: z.array(z.record(z.unknown())) }), execute: async (i, ctx) => { const params: Record<string, string> = { select: i.select }; if (i.limit) params.limit = String(i.limit); const r = await ctx.http.get(`/${i.table}`, { params }); return { data: r.data as unknown[] }; } })
+.withAction('insertRow', { name: 'Insert Row', description: 'Insert a new row', input: z.object({ table: z.string(), data: z.record(z.unknown()) }), output: z.object({ data: z.record(z.unknown()) }), execute: async (i, ctx) => { const r = await ctx.http.post(`/${i.table}`, i.data, { headers: { Prefer: 'return=representation' } }); return { data: (r.data as unknown[])[0] }; } })
+.withAction('updateRow', { name: 'Update Row', description: 'Update rows', input: z.object({ table: z.string(), data: z.record(z.unknown()), filter: z.string() }), output: z.object({ data: z.array(z.record(z.unknown())) }), execute: async (i, ctx) => { const r = await ctx.http.patch(`/${i.table}?${i.filter}`, i.data, { headers: { Prefer: 'return=representation' } }); return { data: r.data as unknown[] }; } })
+.withAction('deleteRow', { name: 'Delete Row', description: 'Delete rows', input: z.object({ table: z.string(), filter: z.string() }), output: z.object({ success: z.boolean() }), execute: async (i, ctx) => { await ctx.http.delete(`/${i.table}?${i.filter}`); return { success: true }; } })
+.withRateLimit({ requests: 100, window: 1000, strategy: 'queue' })
+.withTestConnection(async (_, ctx) => { try { await ctx.http.get('/'); return { success: true, message: 'Connected' }; } catch { return { success: false, message: 'Failed' }; } })
+.build();
+export default supabaseConnector;
